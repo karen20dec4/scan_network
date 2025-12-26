@@ -138,8 +138,15 @@ save_config() {
 
 backup_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
-        local backup_name="${CONFIG_FILE}.bak. $(date +%Y%m%d_%H%M%S)"
-        cp "$CONFIG_FILE" "$backup_name"
+        local backup_name="${CONFIG_FILE}.bak.$(date +%Y%m%d)"  # Fără ora
+        
+        # Creează backup doar dacă nu există deja unul pentru azi
+        if [[ ! -f "$backup_name" ]]; then
+            cp "$CONFIG_FILE" "$backup_name"
+            
+            # Șterge backup-uri mai vechi de 7 zile
+            find "$SCRIPT_DIR" -name "retea_config.conf.bak.*" -mtime +7 -delete
+        fi
     fi
 }
 
@@ -159,44 +166,133 @@ print_separator() {
     echo -e "${GRAY}$(printf '─%.0s' $(seq 1 70))${NC}"
 }
 
+
+
+
+
 detect_connection_type() {
     local ip=$1
     local mac=$2
     local vendor=$3
     
-    # Normalizare MAC pentru căutare
-    local mac_normalized=$(echo "$mac" | tr -d ':' | tr 'A-F' 'a-f')
+    # Normalizare MAC
+    local mac_clean=$(echo "$mac" | tr -d ': ' | tr 'A-F' 'a-f')
+    local mac_colon=$(echo "$mac" | tr 'A-F' 'a-f')
     
-    # Metodă 1: Verifică interfața din ip neigh
-    local interface=$(ip neigh show | grep -i "$mac" | awk '{print $NF}' | head -n1)
+    # Găsește interfața
+    local interface=""
     
-    # Metodă 2: Verifică direct interfața locală
-    if [[ -z "$interface" ]]; then
-        interface=$(ip link show | grep -A1 -i "$mac" | head -n1 | awk -F:  '{print $2}' | xargs)
+    # Metodă 1: Verifică în ARP (extrage interfața, NU statusul)
+    # Format: 192.168.1.106 dev enp3s0 lladdr 18:c0:4d:3a: ec:12 REACHABLE
+    local arp_line=$(ip neigh show | grep -i "$mac_colon" | head -n1)
+    if [[ -n "$arp_line" ]]; then
+        # Extrage interfața (după "dev")
+        interface=$(echo "$arp_line" | grep -oP 'dev \K\S+')
     fi
     
-    # Metodă 3: Verifică dacă este interfața locală curentă
+    # Metodă 2: Verifică interfețe locale (pentru PC-ul curent)
     if [[ -z "$interface" ]]; then
-        local local_iface=$(ip route get "$ip" 2>/dev/null | grep -oP 'dev \K\S+')
-        if [[ -n "$local_iface" ]]; then
-            interface="$local_iface"
+        for iface in /sys/class/net/*; do
+            local iface_name=$(basename "$iface")
+            # Skip loopback
+            [[ "$iface_name" == "lo" ]] && continue
+            
+            local iface_mac=$(cat "$iface/address" 2>/dev/null | tr 'A-F' 'a-f')
+            if [[ "$iface_mac" == "$mac_colon" ]]; then
+                interface="$iface_name"
+                break
+            fi
+        done
+    fi
+    
+    # Metodă 3: Verifică ruta către IP
+    if [[ -z "$interface" ]]; then
+        interface=$(ip route get "$ip" 2>/dev/null | grep -oP 'dev \K\S+' | head -n1)
+    fi
+    
+    # Clasificare pe baza interfeței găsite
+    if [[ -n "$interface" ]]; then
+        # Verifică dacă e wireless (metoda cea mai sigură)
+        if [[ -d "/sys/class/net/$interface/wireless" ]]; then
+            # Încearcă să obții și SSID-ul
+            local ssid=$(iwconfig "$interface" 2>/dev/null | grep -oP 'ESSID: "\K[^"]+')
+            if [[ -n "$ssid" ]]; then
+                echo "WiFi ($ssid)"
+            else
+                echo "WiFi"
+            fi
+            return 0
         fi
+        
+        # Verifică dacă e ethernet cu speed detection
+        if [[ -f "/sys/class/net/$interface/speed" ]]; then
+            local speed=$(cat "/sys/class/net/$interface/speed" 2>/dev/null)
+            # Speed valid (pozitiv)
+            if [[ "$speed" =~ ^[0-9]+$ && "$speed" -gt 0 ]]; then
+                if [[ "$speed" -ge 1000 ]]; then
+                    echo "ETHERNET (${speed}Mbps)"
+                elif [[ "$speed" -ge 100 ]]; then
+                    echo "ETHERNET (${speed}Mbps)"
+                else
+                    echo "ETHERNET (${speed}Mbps)"
+                fi
+                return 0
+            fi
+        fi
+        
+        # Verifică carrier (link up)
+        if [[ -f "/sys/class/net/$interface/carrier" ]]; then
+            local carrier=$(cat "/sys/class/net/$interface/carrier" 2>/dev/null)
+            if [[ "$carrier" == "1" ]]; then
+                echo "ETHERNET"
+                return 0
+            fi
+        fi
+        
+        # Pattern matching pe nume interfață
+        case "$interface" in
+            eth*|enp*|eno*|ens*|em*|enx*)
+                echo "ETHERNET"
+                return 0
+                ;;
+            wlan*|wlp*|wlo*|wlx*|wl*)
+                echo "WiFi"
+                return 0
+                ;;
+            br*|virbr*)
+                echo "BRIDGE"
+                return 0
+                ;;
+            docker*|veth*)
+                echo "VIRTUAL"
+                return 0
+                ;;
+            *)
+                # Interfață necunoscută
+                echo "$interface"
+                return 0
+                ;;
+        esac
     fi
     
-    # Clasificare pe bază de nume interfață
-    if [[ $interface =~ ^(eth|enp|eno|en[0-9]) ]]; then
-        echo "ETHERNET"
-    elif [[ $interface =~ ^(wlan|wlp|wlo|wl[0-9]) ]]; then
-        echo "WiFi"
-    else
-        # Fallback pe vendor
-        if [[ $vendor =~ (Hewlett|HP|Realtek|Intel|Broadcom) ]]; then
+    # Metodă 4: Fallback pe vendor
+    case "$vendor" in
+        *Hewlett*|*HP*|*Dell*|*Lenovo*|*Asus*|*Gigabyte*|*Giga-byte*|*ASRock*|*MSI*|*Intel*Ethernet*|*Realtek*)
             echo "ETHERNET (probabil)"
-        else
+            ;;
+        *Wireless*|*Qualcomm*|*Broadcom*WLAN*|*Atheros*|*Ralink*|*MediaTek*)
+            echo "WiFi (probabil)"
+            ;;
+        *)
             echo "NECUNOSCUT"
-        fi
-    fi
+            ;;
+    esac
 }
+
+
+
+
+
 
 get_hostname() {
     local ip=$1
@@ -447,7 +543,7 @@ perform_scan() {
             # Verificare duplicat MAC (lease vechi ARP)
             if [[ ${seen_devices[$MAC]} ]]; then
                 ((duplicates++))
-                echo -e "${GRAY}${WARN} SKIP│ Duplicat MAC (lease vechi)     │ $IP             │ $MAC${NC}"
+                echo -e "${GRAY}${WARN} SKIP│ Duplicat MAC (lease vechi)        │ $IP  │ $MAC${NC}"
                 continue
             fi
             
@@ -467,7 +563,7 @@ perform_scan() {
                 # Detectare conexiune
                 CONNECTION=$(detect_connection_type "$IP" "$MAC" "$VENDOR")
                 
-                printf "${GREEN}%-7s${NC} │ %-30s │ %-15s │ ${GRAY}%s${NC}\n" \
+                printf "${GREEN}%-7s${NC} │ %-32s │ %-15s │ ${GRAY}%s${NC}\n" \
                     "$CHECK" "$NAME" "$IP" "$MAC"
                 echo -e "        ${GRAY}└─ Conexiune:  $CONNECTION${NC}"
                 
