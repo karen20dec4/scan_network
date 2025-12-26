@@ -1,7 +1,14 @@
 #!/bin/bash
-# version 2.2 - Fixed config loading and connection detection
+# version 2.3 - Fixed config persistence, backup naming, and history
 # Autor: Enhanced by Copilot
 # Data: 2025-12-26
+
+
+# ═══════════════════════════════════════════════════════════════
+# VARIABILE GLOBALE - DECLARATE ÎNAINTE DE ORICE
+# ═══════════════════════════════════════════════════════════════
+declare -A CALCULATOARE
+declare -A IGNORA
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURARE
@@ -36,40 +43,48 @@ if [[ -t 1 ]]; then
     SEARCH="🔍"
 else
     RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' WHITE='' GRAY='' BOLD='' DIM='' NC=''
-    CHECK="[OK]" CROSS="[X]" WARN="[! ]" INFO="[i]" NEW="[*]" SEARCH="[?]"
+    CHECK="[OK]" CROSS="[X]" WARN="[!  ]" INFO="[i]" NEW="[*]" SEARCH="[?]"
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# FUNCȚII HELPER
+# FUNCȚII CONFIGURARE
 # ═══════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════
-# FIX 2: load_config cu debugging
-# ═══════════════════════════════════════════════════════════════
 load_config() {
-    # Declarare globală
-    declare -gA CALCULATOARE
-    declare -gA IGNORA
+    # NU folosi -g (global), lasă bash să gestioneze scope-ul
+    # Reinițializează array-urile
+    CALCULATOARE=()
+    IGNORA=()
     
     if [[ -f "$CONFIG_FILE" ]]; then
         # Încarcă configurația din fișier
-        source "$CONFIG_FILE"
+        source "$CONFIG_FILE" 2>/dev/null
         
         # Verificare încărcare
-        if [[ ${#CALCULATOARE[@]} -eq 0 && ${#IGNORA[@]} -eq 0 ]]; then
+        local loaded_pc=${#CALCULATOARE[@]}
+        local loaded_ignored=${#IGNORA[@]}
+        
+        if [[ $loaded_pc -eq 0 && $loaded_ignored -eq 0 ]]; then
             echo -e "${YELLOW}${WARN} Configurația pare goală, folosesc default${NC}" >&2
-            CALCULATOARE=(
+            declare -A CALCULATOARE=(
                 ["F4:39:09:10:6A:3C"]="Mint22 (Wired)"
                 ["0C:4D:E9:A9:D9:28"]="iMac-Timelord (Wired)"
             )
+            declare -A IGNORA=(
+                ["FC:67:1F:7A:12:48"]="Priza Hol"
+                ["5E: 9B:C7:77:87:40"]="S20-FE-Geo"
+                ["86:FF:6E: F3:C4:EF"]="Galaxy-Note9"
+            )
+            save_config
         fi
     else
         # Configurație default
-        CALCULATOARE=(
+        echo -e "${YELLOW}${INFO} Creare configurație nouă... ${NC}" >&2
+        declare -A CALCULATOARE=(
             ["F4:39:09:10:6A:3C"]="Mint22 (Wired)"
             ["0C:4D:E9:A9:D9:28"]="iMac-Timelord (Wired)"
         )
-        IGNORA=(
+        declare -A IGNORA=(
             ["FC:67:1F:7A:12:48"]="Priza Hol"
             ["5E:9B:C7:77:87:40"]="S20-FE-Geo"
             ["86:FF:6E:F3:C4:EF"]="Galaxy-Note9"
@@ -78,39 +93,55 @@ load_config() {
     fi
 }
 
-# Salvare configurație
 save_config() {
-    cat > "$CONFIG_FILE" << 'EOF'
-# Configurație Network Scanner
-# Generat automat:  
-EOF
-    echo "# $(date)" >> "$CONFIG_FILE"
-    echo "" >> "$CONFIG_FILE"
+    local temp_file="${CONFIG_FILE}.tmp"
     
-    # Salvează CALCULATOARE
-    echo "declare -A CALCULATOARE=(" >> "$CONFIG_FILE"
-    for mac in "${!CALCULATOARE[@]}"; do
-        echo "    [\"$mac\"]=\"${CALCULATOARE[$mac]}\"" >> "$CONFIG_FILE"
-    done
-    echo ")" >> "$CONFIG_FILE"
-    echo "" >> "$CONFIG_FILE"
+    {
+        echo "# Configurație Network Scanner"
+        echo "# Generat automat:  $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        
+        # Salvează CALCULATOARE (FĂRĂ declare -A)
+        echo "CALCULATOARE=("
+        if [[ ${#CALCULATOARE[@]} -gt 0 ]]; then
+            for mac in "${!CALCULATOARE[@]}"; do
+                printf '    ["%s"]="%s"\n' "$mac" "${CALCULATOARE[$mac]}"
+            done
+        fi
+        echo ")"
+        echo ""
+        
+        # Salvează IGNORA (FĂRĂ declare -A)
+        echo "IGNORA=("
+        if [[ ${#IGNORA[@]} -gt 0 ]]; then
+            for mac in "${!IGNORA[@]}"; do
+                printf '    ["%s"]="%s"\n' "$mac" "${IGNORA[$mac]}"
+            done
+        fi
+        echo ")"
+    } > "$temp_file"
     
-    # Salvează IGNORA
-    echo "declare -A IGNORA=(" >> "$CONFIG_FILE"
-    for mac in "${!IGNORA[@]}"; do
-        echo "    [\"$mac\"]=\"${IGNORA[$mac]}\"" >> "$CONFIG_FILE"
-    done
-    echo ")" >> "$CONFIG_FILE"
-}
-
-# Creare backup
-backup_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        cp "$CONFIG_FILE" "$CONFIG_FILE.bak. $(date +%Y%m%d_%H%M%S)"
+    if [[ -s "$temp_file" ]]; then
+        mv "$temp_file" "$CONFIG_FILE"
+        chmod 644 "$CONFIG_FILE"
+    else
+        echo -e "${RED}${CROSS} Eroare: fișier configurație gol! ${NC}" >&2
+        rm -f "$temp_file"
+        return 1
     fi
 }
 
-# Header fancy
+backup_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local backup_name="${CONFIG_FILE}.bak. $(date +%Y%m%d_%H%M%S)"
+        cp "$CONFIG_FILE" "$backup_name"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# FUNCȚII HELPER
+# ═══════════════════════════════════════════════════════════════
+
 print_header() {
     local width=70
     echo -e "${CYAN}╔$(printf '═%.0s' $(seq 1 $((width-2))))╗${NC}"
@@ -119,26 +150,24 @@ print_header() {
     echo -e "${CYAN}╚$(printf '═%.0s' $(seq 1 $((width-2))))╝${NC}"
 }
 
-# Separator
 print_separator() {
     echo -e "${GRAY}$(printf '─%.0s' $(seq 1 70))${NC}"
 }
 
-# Detectare tip conexiune (FIX: detecție mai precisă)
 detect_connection_type() {
     local ip=$1
     local mac=$2
     local vendor=$3
     
     # Normalizare MAC pentru căutare
-    local mac_normalized=$(echo "$mac" | tr -d ': ' | tr 'A-F' 'a-f')
+    local mac_normalized=$(echo "$mac" | tr -d ':' | tr 'A-F' 'a-f')
     
     # Metodă 1: Verifică interfața din ip neigh
     local interface=$(ip neigh show | grep -i "$mac" | awk '{print $NF}' | head -n1)
     
     # Metodă 2: Verifică direct interfața locală
     if [[ -z "$interface" ]]; then
-        interface=$(ip link show | grep -A1 -i "$mac" | head -n1 | awk -F: '{print $2}' | xargs)
+        interface=$(ip link show | grep -A1 -i "$mac" | head -n1 | awk -F:  '{print $2}' | xargs)
     fi
     
     # Metodă 3: Verifică dacă este interfața locală curentă
@@ -164,7 +193,6 @@ detect_connection_type() {
     fi
 }
 
-# Obținere hostname
 get_hostname() {
     local ip=$1
     
@@ -179,9 +207,6 @@ get_hostname() {
     echo "$hostname"
 }
 
-# ═══════════════════════════════════════════════════════════════
-# FIX 1: add_device_interactive cu stdin redirect
-# ═══════════════════════════════════════════════════════════════
 add_device_interactive() {
     local mac=$1
     local ip=$2
@@ -190,7 +215,7 @@ add_device_interactive() {
     
     echo -e "\n${YELLOW}${NEW} Dispozitiv nou detectat! ${NC}"
     echo -e "  ${GRAY}MAC: ${NC}      $mac"
-    echo -e "  ${GRAY}IP:  ${NC}       $ip"
+    echo -e "  ${GRAY}IP: ${NC}       $ip"
     echo -e "  ${GRAY}Vendor:${NC}   $vendor"
     echo -e "  ${GRAY}Tip:${NC}      $([ "$is_pc" == "yes" ] && echo "Calculator/Server" || echo "Alt dispozitiv")"
     
@@ -200,7 +225,7 @@ add_device_interactive() {
     echo -e "  ${RED}3${NC} - Ignoră pentru acum"
     
     local choice
-    read -p "$(echo -e ${CYAN}Alege opțiunea [1-3]:  ${NC})" choice < /dev/tty
+    read -p "$(echo -e ${CYAN}Alege opțiunea [1-3]: ${NC})" choice < /dev/tty
     
     case $choice in
         1)
@@ -210,9 +235,9 @@ add_device_interactive() {
                 CALCULATOARE["$mac"]="$name"
                 backup_config
                 save_config
-                echo -e "${GREEN}${CHECK} Adăugat la calculatoare:  $name${NC}"
+                echo -e "${GREEN}${CHECK} Adăugat la calculatoare: $name${NC}"
             else
-                echo -e "${RED}${CROSS} Nume invalid! ${NC}"
+                echo -e "${RED}${CROSS} Nume invalid!${NC}"
             fi
             ;;
         2)
@@ -231,7 +256,7 @@ add_device_interactive() {
             echo -e "${GRAY}${INFO} Ignorat temporar${NC}"
             ;;
         *)
-            echo -e "${RED}${CROSS} Opțiune invalidă: '$choice'${NC}"
+            echo -e "${RED}${CROSS} Opțiune invalidă:  '$choice'${NC}"
             ;;
     esac
     
@@ -239,8 +264,6 @@ add_device_interactive() {
     sleep 1
 }
 
-
-# Salvare istoric
 save_to_history() {
     local mac=$1
     local ip=$2
@@ -253,12 +276,13 @@ save_to_history() {
     fi
     
     local entry="{\"timestamp\": \"$timestamp\",\"mac\": \"$mac\",\"ip\": \"$ip\",\"name\": \"$name\",\"status\": \"$status\"}"
-    echo "$entry" >> "${HISTORY_FILE}. tmp"
+    echo "$entry" >> "${HISTORY_FILE}"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# FUNCȚIA PRINCIPALĂ DE SCANARE (COMPLET REFĂCUTĂ)
+# FUNCȚIA PRINCIPALĂ DE SCANARE
 # ═══════════════════════════════════════════════════════════════
+
 perform_scan() {
     local interactive=$1
     
@@ -294,7 +318,7 @@ perform_scan() {
             # Obține MAC și detalii
             SCAN_DETAIL=$(sudo nmap -sP --host-timeout 1s $IP 2>/dev/null)
             
-            # FIX: Extragere și normalizare MAC
+            # Extragere și normalizare MAC
             MAC=$(echo "$SCAN_DETAIL" | grep "MAC Address" | awk '{print $3}' | tr -d ' ' | tr 'a-f' 'A-F')
             
             # Dacă nu vedem MAC (este PC-ul local)
@@ -323,7 +347,7 @@ perform_scan() {
             POTENTIAL_PC=$(sudo nmap -p 22,445,3389,5900 --host-timeout 500ms $IP 2>/dev/null | grep "open")
             IS_PC=$([ -n "$POTENTIAL_PC" ] && echo "yes" || echo "no")
             
-            # FIX: Clasificare dispozitiv cu verificare corectă
+            # Clasificare dispozitiv
             if [[ -n "${CALCULATOARE[$MAC]}" ]]; then
                 # Calculator cunoscut
                 ((pc_known++))
@@ -334,7 +358,7 @@ perform_scan() {
                 
                 printf "${GREEN}%-7s${NC} │ %-30s │ %-15s │ ${GRAY}%s${NC}\n" \
                     "$CHECK" "$NAME" "$IP" "$MAC"
-                echo -e "        ${GRAY}└─ Conexiune: $CONNECTION${NC}"
+                echo -e "        ${GRAY}└─ Conexiune:  $CONNECTION${NC}"
                 
                 save_to_history "$MAC" "$IP" "$NAME" "online"
                 
@@ -392,6 +416,10 @@ perform_scan() {
 # ═══════════════════════════════════════════════════════════════
 
 show_config() {
+    
+    # DEBUG
+    echo "DEBUG: Încărcat ${#CALCULATOARE[@]} PC-uri, ${#IGNORA[@]} ignorate" >&2
+    
     print_header "CONFIGURAȚIE CURENTĂ"
     
     echo -e "${BOLD}${GREEN}Calculatoare Monitorizate (${#CALCULATOARE[@]}):${NC}"
@@ -417,15 +445,59 @@ show_config() {
 show_history() {
     print_header "ISTORIC (ultimele 20 intrări)"
     
-    if [[ -f "${HISTORY_FILE}.tmp" ]]; then
-        tail -n 20 "${HISTORY_FILE}.tmp" | while read -r line; do
-            echo -e "${GRAY}$line${NC}"
+    if [[ -f "$HISTORY_FILE" ]] && [[ -s "$HISTORY_FILE" ]]; then
+        echo -e "${BOLD}${WHITE}STATUS │ DATA/ORA            │ DISPOZITIV               │ IP ADDRESS${NC}"
+        print_separator
+        
+        tail -n 20 "$HISTORY_FILE" | while IFS= read -r line; do
+            # Parse JSON simplu
+            local timestamp=$(echo "$line" | sed -n 's/.*"timestamp": *"\([^"]*\)".*/\1/p')
+            local mac=$(echo "$line" | sed -n 's/.*"mac": *"\([^"]*\)".*/\1/p')
+            local ip=$(echo "$line" | sed -n 's/.*"ip": *"\([^"]*\)".*/\1/p')
+            local name=$(echo "$line" | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
+            local status=$(echo "$line" | sed -n 's/.*"status": *"\([^"]*\)".*/\1/p')
+            
+            # Skip dacă parsarea a eșuat
+            [[ -z "$mac" ]] && continue
+            
+            # Format timestamp - folosim bash string manipulation
+            # timestamp = "2025-12-26T01:29:59+02:00"
+            local date_part="${timestamp%%T*}"         # 2025-12-26
+            local time_full="${timestamp#*T}"          # 01:29:59+02:00
+            local time_part="${time_full%%+*}"         # 01:29:59
+            local time_part="${time_part%%-*}"         # 01:29: 59 (dacă e -)
+            
+            # Extrage componente
+            local year="${date_part%%-*}"              # 2025
+            local month_day="${date_part#*-}"          # 12-26
+            local month="${month_day%%-*}"             # 12
+            local day="${month_day#*-}"                # 26
+            
+            # Extrage ora: min
+            local hour="${time_part%%:*}"              # 01
+            local min_sec="${time_part#*: }"            # 29:59
+            local min="${min_sec%%:*}"                 # 29
+            
+            local datetime="$day-$month $hour:$min"
+            
+            # Truncate name la 24 caractere
+            local name_short="${name: 0:24}"
+            
+            # Afișare colorată
+            if [[ $status == "online" ]]; then
+                printf "${GREEN}%-6s${NC} │ ${GRAY}%-19s${NC} │ %-24s │ ${WHITE}%-15s${NC}\n" \
+                    "$CHECK" "$datetime" "$name_short" "$ip"
+            else
+                printf "${YELLOW}%-6s${NC} │ ${GRAY}%-19s${NC} │ %-24s │ ${WHITE}%-15s${NC}\n" \
+                    "$NEW" "$datetime" "$name_short" "$ip"
+            fi
         done
     else
         echo -e "${YELLOW}${INFO} Nu există istoric${NC}"
     fi
     print_separator
 }
+
 
 flush_arp_cache() {
     print_header "CURĂȚARE CACHE ARP"
@@ -437,7 +509,7 @@ flush_arp_cache() {
 
 show_menu() {
     clear
-    print_header "NETWORK SCANNER v2.2"
+    print_header "NETWORK SCANNER v2.3"
     echo -e "${CYAN}Selectează o opțiune:${NC}\n"
     echo -e "  ${GREEN}1${NC} - Scanare rapidă (fără interacțiune)"
     echo -e "  ${GREEN}2${NC} - Scanare interactivă (adaugă dispozitive noi)"
@@ -450,7 +522,7 @@ show_menu() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# MAIN
+# MAIN (MODIFICAT)
 # ═══════════════════════════════════════════════════════════════
 
 # Verificare dependințe
@@ -469,12 +541,15 @@ if [[ $EUID -ne 0 && -z "$1" ]]; then
     exec sudo "$0" "$@"
 fi
 
-# Încărcare configurație
+# Încărcare configurație INIȚIALĂ
 load_config
 
 # Mod de execuție
 if [[ $# -eq 0 ]]; then
     while true; do
+        # REÎNCARCĂ configurația la fiecare iterație
+        load_config
+        
         show_menu
         read -p "$(echo -e ${CYAN}Opțiunea ta: ${NC})" option
         
@@ -501,6 +576,7 @@ if [[ $# -eq 0 ]]; then
                 ;;
             5)
                 ${EDITOR:-nano} "$CONFIG_FILE"
+                # Reîncarcă EXPLICIT după editare
                 load_config
                 echo -e "${GREEN}${CHECK} Configurație reîncărcată${NC}"
                 sleep 2
@@ -508,7 +584,7 @@ if [[ $# -eq 0 ]]; then
             6)
                 clear
                 flush_arp_cache
-                read -p "$(echo -e ${GRAY}Apasă Enter pentru a continua... ${NC})"
+                read -p "$(echo -e ${GRAY}Apasă Enter pentru a continua...${NC})"
                 ;;
             0)
                 echo -e "${GREEN}${CHECK} La revedere! ${NC}"
