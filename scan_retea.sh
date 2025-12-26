@@ -1,14 +1,19 @@
 #!/bin/bash
-# version 2.31 - Fixed config persistence, backup naming, and history
+# version 2.4 - Fixed config persistence, backup naming, and history
 # Autor: Enhanced by Copilot
 # Data: 2025-12-26
-
 
 # ═══════════════════════════════════════════════════════════════
 # VARIABILE GLOBALE - DECLARATE ÎNAINTE DE ORICE
 # ═══════════════════════════════════════════════════════════════
 declare -A CALCULATOARE
 declare -A IGNORA
+
+# ═══════════════════════════════════════════════════════════════
+# VARIABILE CACHE PENTRU SCANARE
+# ═══════════════════════════════════════════════════════════════
+declare -gA SCAN_CACHE_MAC_TO_IP
+declare -g SCAN_CACHE_TIME=0
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURARE
@@ -145,8 +150,8 @@ backup_config() {
 print_header() {
     local width=70
     echo -e "${CYAN}╔$(printf '═%.0s' $(seq 1 $((width-2))))╗${NC}"
-    echo -e "${CYAN}║${BOLD}${WHITE}$(printf '%*s' $(((width + ${#1})/2)) "$1")$(printf '%*s' $(((width - ${#1})/2)) "")${NC}${CYAN}║${NC}"
-    echo -e "${CYAN}║${GRAY}$(printf '%*s' $(((width + 19)/2)) "$(date '+%d-%m-%Y %H:%M:%S')")$(printf '%*s' $(((width - 19)/2)) "")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${BOLD}${WHITE}$(printf '%*s' $(((width + ${#1})/2)) "$1")$(printf '%*s' $(((width - ${#1})/2-2)) "")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${GRAY}$(printf '%*s' $(((width + 19)/2)) "$(date '+%d-%m-%Y %H:%M:%S')")$(printf '%*s' $(((width - 19)/2-1)) "")${NC}${CYAN}║${NC}"
     echo -e "${CYAN}╚$(printf '═%.0s' $(seq 1 $((width-2))))╝${NC}"
 }
 
@@ -281,6 +286,51 @@ save_to_history() {
 
 
 
+
+
+# ═══════════════════════════════════════════════════════════════
+# FUNCȚIE CACHE: Actualizează cache-ul de scanare
+# ═══════════════════════════════════════════════════════════════
+update_scan_cache() {
+    local current_time=$(date +%s)
+    local cache_age=$((current_time - SCAN_CACHE_TIME))
+    
+    # Actualizează cache doar dacă e mai vechi de 180 secunde (3 minute)
+    if [[ $cache_age -lt 180 ]]; then
+        return 0
+    fi
+    
+    # Curăță cache-ul vechi
+    SCAN_CACHE_MAC_TO_IP=()
+    
+    # Scanare rapidă optimizată
+    local scan_output=$(sudo nmap -sn -T5 --min-parallelism 100 $SUBNET 2>/dev/null)
+    
+    # Parsare rezultate
+    local current_ip=""
+    while IFS= read -r line; do
+        if echo "$line" | grep -q "^Nmap scan report for"; then
+            current_ip=$(echo "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+        elif echo "$line" | grep -q "MAC Address: "; then
+            local current_mac=$(echo "$line" | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-f' 'A-F')
+            if [[ -n "$current_mac" && -n "$current_ip" ]]; then
+                SCAN_CACHE_MAC_TO_IP[$current_mac]="$current_ip"
+            fi
+            current_ip=""
+        fi
+    done <<< "$scan_output"
+    
+    # Adaugă PC local (nu apare în nmap cu MAC)
+    local local_mac=$(ip link show | grep "link/ether" | awk '{print $2}' | tr 'a-f' 'A-F' | head -n 1)
+    if [[ -n "$local_mac" ]]; then
+        local local_ip=$(hostname -I | awk '{print $1}')
+        SCAN_CACHE_MAC_TO_IP[$local_mac]="$local_ip"
+    fi
+    
+    # Salvează timestamp
+    SCAN_CACHE_TIME=$current_time
+}
+
 # ═══════════════════════════════════════════════════════════════
 # FUNCȚIE NOUĂ: Verifică dacă un IP este online
 # ═══════════════════════════════════════════════════════════════
@@ -291,68 +341,54 @@ check_ip_online() {
     return $?
 }
 
-
-
 # ═══════════════════════════════════════════════════════════════
-# FUNCȚIE NOUĂ: Afișează dashboard cu status PC-uri monitorizate
+# FUNCȚIE OPTIMIZATĂ: Dashboard cu cache (180s)
 # ═══════════════════════════════════════════════════════════════
 show_monitored_dashboard() {
-    # Dacă nu avem PC-uri monitorizate, skip
     [[ ${#CALCULATOARE[@]} -eq 0 ]] && return
     
+    # Actualizează cache dacă e necesar (o dată la 3 minute)
+    update_scan_cache
+    
     echo -e "\n${CYAN}╔$(printf '═%.0s' $(seq 1 68))╗${NC}"
-    echo -e "${CYAN}║${BOLD}${WHITE}$(printf '%*s' 39 "Calculatoare Monitorizate")$(printf '%*s' 29 "")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${BOLD}${WHITE}$(printf '%*s' 45 "Calculatoare Monitorizate")$(printf '%*s' 23 "")${NC}${CYAN}║${NC}"
     echo -e "${CYAN}╠$(printf '═%.0s' $(seq 1 68))╣${NC}"
     
-    # Array asociativ pentru a mapa MAC -> IP din ultima scanare
-    declare -A mac_to_ip
-    
-    # Scanare rapidă pentru a obține IP-urile curente
-    local scan_output=$(sudo nmap -sn -T5 $SUBNET 2>/dev/null | grep -B2 "MAC Address")
-    
-    # Parsare rezultate nmap pentru a construi maparea MAC->IP
-    while IFS= read -r line; do
-        if [[ $line =~ ^Nmap\ scan\ report\ for\ ([0-9.]+) ]]; then
-            local current_ip="${BASH_REMATCH[1]}"
-        elif [[ $line =~ MAC\ Address: \ ([0-9A-Fa-f: ]+) ]]; then
-            local current_mac=$(echo "${BASH_REMATCH[1]}" | tr 'a-f' 'A-F')
-            mac_to_ip[$current_mac]="$current_ip"
-        fi
-    done <<< "$scan_output"
-    
-    # Verifică și PC-ul local (nu apare în nmap cu MAC)
-    local local_mac=$(ip link show | grep "link/ether" | awk '{print $2}' | tr 'a-f' 'A-F' | head -n 1)
-    if [[ -n "$local_mac" ]]; then
-        local local_ip=$(hostname -I | awk '{print $1}')
-        mac_to_ip[$local_mac]="$local_ip"
-    fi
-    
-    # Afișare status pentru fiecare PC monitorizat
-    for mac in "${! CALCULATOARE[@]}"; do
+    # Folosește cache-ul pentru afișare rapidă
+    for mac in "${!CALCULATOARE[@]}"; do
         local name="${CALCULATOARE[$mac]}"
-        local ip="${mac_to_ip[$mac]}"
+        local ip="${SCAN_CACHE_MAC_TO_IP[$mac]}"
         
         if [[ -n "$ip" ]]; then
-            # PC găsit, verifică dacă răspunde la ping
-            if check_ip_online "$ip"; then
-                printf "${CYAN}║${NC} ${WHITE}%-15s${NC} → %-30s ${GREEN}%-8s${NC} ${CYAN}║${NC}\n" \
-                    "$ip" "${name: 0:30}" "ONLINE"
+            # PC găsit în cache - verificare ping rapidă
+            if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then
+                printf "${CYAN}║${NC} ${WHITE}%-15s${NC} → %-39s ${GREEN}%-8s${NC} ${CYAN}║${NC}\n" \
+                    "$ip" "${name:0:30}" "ONLINE"
             else
-                printf "${CYAN}║${NC} ${WHITE}%-15s${NC} → %-30s ${YELLOW}%-8s${NC} ${CYAN}║${NC}\n" \
+                printf "${CYAN}║${NC} ${WHITE}%-15s${NC} → %-39s ${YELLOW}%-8s${NC} ${CYAN}║${NC}\n" \
                     "$ip" "${name:0:30}" "PING?"
             fi
         else
-            # PC nu găsit în rețea
-            printf "${CYAN}║${NC} ${GRAY}%-15s${NC} → %-30s ${RED}%-8s${NC} ${CYAN}║${NC}\n" \
-                "N/A" "${name:0:30}" "OFFLINE"
+            # PC nu găsit în cache
+            printf "${CYAN}║${NC} ${GRAY}%-15s${NC} → %-39s ${RED}%-8s${NC} ${CYAN}║${NC}\n" \
+                "N/A" "${name: 0:30}" "OFFLINE"
         fi
     done
     
     echo -e "${CYAN}╚$(printf '═%.0s' $(seq 1 68))╝${NC}"
-    echo ""
+    
+    # Afișează vârsta cache-ului (optional - doar pentru debug)
+    local current_time=$(date +%s)
+    local cache_age=$((current_time - SCAN_CACHE_TIME))
+    if [[ $cache_age -lt 10 ]]; then
+        echo -e "${GRAY}(actualizat acum ${cache_age}s)${NC}\n"
+    elif [[ $cache_age -lt 60 ]]; then
+        echo -e "${GRAY}(cache:  ${cache_age}s)${NC}\n"
+    else
+        local cache_min=$((cache_age / 60))
+        echo -e "${GRAY}(cache: ${cache_min}m)${NC}\n"
+    fi
 }
-
-
 
 # ═══════════════════════════════════════════════════════════════
 # FUNCȚIA PRINCIPALĂ DE SCANARE
@@ -362,10 +398,7 @@ perform_scan() {
     local interactive=$1
     
     print_header "SCANARE REȚEA LOCALĂ"
-
-    # NOU: Afișează dashboard-ul cu status PC-uri monitorizate
-    show_monitored_dashboard
-    
+        
     echo -e "${CYAN}${SEARCH} Scanez subnet: ${WHITE}$SUBNET${NC}"
     echo -e "${GRAY}Te rog așteaptă... ${NC}\n"
     
@@ -587,7 +620,10 @@ flush_arp_cache() {
 
 show_menu() {
     clear
-    print_header "NETWORK SCANNER v2.3"
+    print_header "NETWORK SCANNER v2.4"
+    # NOU: Afișează dashboard-ul cu status PC-uri monitorizate
+    show_monitored_dashboard
+
     echo -e "${CYAN}Selectează o opțiune:${NC}\n"
     echo -e "  ${GREEN}1${NC} - Scanare rapidă (fără interacțiune)"
     echo -e "  ${GREEN}2${NC} - Scanare interactivă (adaugă dispozitive noi)"
@@ -595,6 +631,7 @@ show_menu() {
     echo -e "  ${CYAN}4${NC} - Afișare istoric"
     echo -e "  ${YELLOW}5${NC} - Editare configurație manuală"
     echo -e "  ${MAGENTA}6${NC} - Curățare cache ARP (rezolvă duplicate)"
+    echo -e "  ${MAGENTA}7${NC} - Reîmprospătare status calculatoare"
     echo -e "  ${RED}0${NC} - Ieșire"
     print_separator
 }
@@ -663,6 +700,11 @@ if [[ $# -eq 0 ]]; then
                 clear
                 flush_arp_cache
                 read -p "$(echo -e ${GRAY}Apasă Enter pentru a continua...${NC})"
+                ;;
+            7)
+                SCAN_CACHE_TIME=0  # Resetează cache
+                echo -e "${CYAN}${INFO} Cache șters, se va actualiza... ${NC}"
+                sleep 1
                 ;;
             0)
                 echo -e "${GREEN}${CHECK} La revedere! ${NC}"
