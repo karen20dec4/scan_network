@@ -1,5 +1,5 @@
 #!/bin/bash
-# version 2.4 - Fixed config persistence, backup naming, and history
+# version 2.5 - Fixed config persistence, backup naming, and history
 # Autor: Enhanced by Copilot
 # Data: 2025-12-26
 
@@ -56,12 +56,27 @@ fi
 # ═══════════════════════════════════════════════════════════════
 
 load_config() {
-    # NU folosi -g (global), lasă bash să gestioneze scope-ul
     # Reinițializează array-urile
     CALCULATOARE=()
     IGNORA=()
     
     if [[ -f "$CONFIG_FILE" ]]; then
+        # Verifică integritatea fișierului înainte de încărcare
+        if !  bash -n "$CONFIG_FILE" 2>/dev/null; then
+            echo -e "${RED}${CROSS} Eroare:  Configurație coruptă!${NC}" >&2
+            echo -e "${YELLOW}${WARN} Restaurez din backup...${NC}" >&2
+            
+            # Caută cel mai recent backup valid
+            local latest_backup=$(ls -t "${CONFIG_FILE}. bak."* 2>/dev/null | head -n1)
+            if [[ -n "$latest_backup" ]]; then
+                cp "$latest_backup" "$CONFIG_FILE"
+                echo -e "${GREEN}${CHECK} Restaurat din:  $(basename "$latest_backup")${NC}" >&2
+            else
+                echo -e "${RED}${CROSS} Nu există backup!  Folosesc configurație goală.${NC}" >&2
+                return 1
+            fi
+        fi
+        
         # Încarcă configurația din fișier
         source "$CONFIG_FILE" 2>/dev/null
         
@@ -69,34 +84,18 @@ load_config() {
         local loaded_pc=${#CALCULATOARE[@]}
         local loaded_ignored=${#IGNORA[@]}
         
+        # NU mai regenera automat dacă e gol! 
         if [[ $loaded_pc -eq 0 && $loaded_ignored -eq 0 ]]; then
-            echo -e "${YELLOW}${WARN} Configurația pare goală, folosesc default${NC}" >&2
-            declare -A CALCULATOARE=(
-                ["F4:39:09:10:6A:3C"]="Mint22 (Wired)"
-                ["0C:4D:E9:A9:D9:28"]="iMac-Timelord (Wired)"
-            )
-            declare -A IGNORA=(
-                ["FC:67:1F:7A:12:48"]="Priza Hol"
-                ["5E: 9B:C7:77:87:40"]="S20-FE-Geo"
-                ["86:FF:6E: F3:C4:EF"]="Galaxy-Note9"
-            )
-            save_config
+            echo -e "${YELLOW}${WARN} Configurație goală (nu există dispozitive salvate)${NC}" >&2
         fi
     else
-        # Configurație default
-        echo -e "${YELLOW}${INFO} Creare configurație nouă... ${NC}" >&2
-        declare -A CALCULATOARE=(
-            ["F4:39:09:10:6A:3C"]="Mint22 (Wired)"
-            ["0C:4D:E9:A9:D9:28"]="iMac-Timelord (Wired)"
-        )
-        declare -A IGNORA=(
-            ["FC:67:1F:7A:12:48"]="Priza Hol"
-            ["5E:9B:C7:77:87:40"]="S20-FE-Geo"
-            ["86:FF:6E:F3:C4:EF"]="Galaxy-Note9"
-        )
-        save_config
+        # Fișier lipsă - creează configurație nouă DOAR la prima rulare
+        echo -e "${YELLOW}${INFO} Nu există configurație.  Creez fișier gol...${NC}" >&2
+        save_config  # Salvează configurație goală
     fi
 }
+
+
 
 save_config() {
     local temp_file="${CONFIG_FILE}.tmp"
@@ -106,35 +105,43 @@ save_config() {
         echo "# Generat automat:  $(date '+%Y-%m-%d %H:%M:%S')"
         echo ""
         
-        # Salvează CALCULATOARE (FĂRĂ declare -A)
+        # Salvează CALCULATOARE
         echo "CALCULATOARE=("
         if [[ ${#CALCULATOARE[@]} -gt 0 ]]; then
             for mac in "${!CALCULATOARE[@]}"; do
-                printf '    ["%s"]="%s"\n' "$mac" "${CALCULATOARE[$mac]}"
+                # NORMALIZARE MAC:  elimină spații
+                local mac_clean=$(echo "$mac" | tr -d ' ')
+                printf '    ["%s"]="%s"\n' "$mac_clean" "${CALCULATOARE[$mac]}"
             done
         fi
         echo ")"
         echo ""
         
-        # Salvează IGNORA (FĂRĂ declare -A)
+        # Salvează IGNORA
         echo "IGNORA=("
         if [[ ${#IGNORA[@]} -gt 0 ]]; then
             for mac in "${!IGNORA[@]}"; do
-                printf '    ["%s"]="%s"\n' "$mac" "${IGNORA[$mac]}"
+                # NORMALIZARE MAC:  elimină spații
+                local mac_clean=$(echo "$mac" | tr -d ' ')
+                printf '    ["%s"]="%s"\n' "$mac_clean" "${IGNORA[$mac]}"
             done
         fi
         echo ")"
     } > "$temp_file"
     
-    if [[ -s "$temp_file" ]]; then
+    # Validare sintaxă înainte de a suprascrie
+    if bash -n "$temp_file" 2>/dev/null; then
         mv "$temp_file" "$CONFIG_FILE"
         chmod 644 "$CONFIG_FILE"
     else
-        echo -e "${RED}${CROSS} Eroare: fișier configurație gol! ${NC}" >&2
+        echo -e "${RED}${CROSS} Eroare: Configurație generată invalidă!${NC}" >&2
+        cat "$temp_file" >&2
         rm -f "$temp_file"
         return 1
     fi
 }
+
+
 
 backup_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -313,6 +320,9 @@ add_device_interactive() {
     local ip=$2
     local vendor=$3
     local is_pc=$4
+
+    # NORMALIZARE MAC (elimină spații)
+    mac=$(echo "$mac" | tr -d ' ')
     
     echo -e "\n${YELLOW}${NEW} Dispozitiv nou detectat! ${NC}"
     echo -e "  ${GRAY}MAC: ${NC}      $mac"
@@ -716,7 +726,7 @@ flush_arp_cache() {
 
 show_menu() {
     clear
-    print_header "NETWORK SCANNER v2.4"
+    print_header "NETWORK SCANNER v2.5"
     # NOU: Afișează dashboard-ul cu status PC-uri monitorizate
     show_monitored_dashboard
 
@@ -728,9 +738,107 @@ show_menu() {
     echo -e "  ${YELLOW}5${NC} - Editare configurație manuală"
     echo -e "  ${MAGENTA}6${NC} - Curățare cache ARP (rezolvă duplicate)"
     echo -e "  ${MAGENTA}7${NC} - Reîmprospătare status calculatoare"
+    echo -e "  ${BLUE}8${NC} - Verificare și reparare configurație"
     echo -e "  ${RED}0${NC} - Ieșire"
     print_separator
 }
+
+
+
+verify_and_repair_config() {
+    print_header "VERIFICARE CONFIGURAȚIE"
+    
+    local issues_found=0
+    
+    echo -e "${CYAN}${INFO} Verific integritatea fișierului...  ${NC}\n"
+    
+    # 1. Verifică sintaxă bash
+    if !  bash -n "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "  ${RED}${CROSS} Sintaxă bash: EROARE${NC}"
+        ((issues_found++))
+    else
+        echo -e "  ${GREEN}${CHECK} Sintaxă bash:  OK${NC}"
+    fi
+    
+    # 2. Verifică spații în adrese MAC
+    if grep -q ': [0-9A-F]' "$CONFIG_FILE"; then
+        echo -e "  ${YELLOW}${WARN} Adrese MAC: Găsite spații după ':' ${NC}"
+        ((issues_found++))
+        
+        # Afișează MAC-urile problematice
+        echo -e "\n${YELLOW}MAC-uri cu spații:${NC}"
+        grep -o '\["[0-9A-F:  ]*"\]' "$CONFIG_FILE" | grep ': ' | while read mac; do
+            echo -e "  ${GRAY}→ $mac${NC}"
+        done
+        echo ""
+    else
+        echo -e "  ${GREEN}${CHECK} Adrese MAC: OK (fără spații)${NC}"
+    fi
+    
+    # 3. Verifică existență backup
+    local backup_count=$(ls -1 "${CONFIG_FILE}.bak."* 2>/dev/null | wc -l)
+    if [[ $backup_count -gt 0 ]]; then
+        echo -e "  ${GREEN}${CHECK} Backup-uri: $backup_count găsite${NC}"
+    else
+        echo -e "  ${YELLOW}${WARN} Backup-uri: Niciun backup găsit${NC}"
+    fi
+    
+    # 4. Propune reparare
+    echo ""
+    if [[ $issues_found -gt 0 ]]; then
+        echo -e "${YELLOW}${WARN} Găsite $issues_found probleme! ${NC}\n"
+        read -p "$(echo -e ${CYAN}Vrei să repari automat? [Y/n]:  ${NC})" confirm < /dev/tty
+        
+        if [[ !  $confirm =~ ^[Nn]$ ]]; then
+            echo -e "\n${CYAN}${INFO} Repar configurația...${NC}"
+            
+            # Backup înainte de reparare (FĂRĂ spațiu după repair)
+            local backup_file="${CONFIG_FILE}.before_repair_$(date +%Y%m%d_%H%M%S)"
+            cp "$CONFIG_FILE" "$backup_file"
+            echo -e "  ${GRAY}Backup:  $(basename "$backup_file")${NC}"
+            
+            # METODA 1: Elimină TOATE spațiile după ':'
+            sed -i 's/: /:/g' "$CONFIG_FILE"
+            
+            # METODA 2 (fallback): Elimină spații în contextul MAC
+            sed -i 's/\(\["\)\([0-9A-F]\{2\}\): \([0-9A-F]\)/\1\2:\3/g' "$CONFIG_FILE"
+            sed -i 's/\([0-9A-F]\): \([0-9A-F]\)/\1:\2/g' "$CONFIG_FILE"
+            
+            # Verifică din nou
+            if grep -q ':  [0-9A-F]' "$CONFIG_FILE"; then
+                echo -e "${RED}${CROSS} Reparare eșuată! Mai există spații... ${NC}"
+                
+                # Debug: arată ce a rămas
+                echo -e "${YELLOW}Rămase: ${NC}"
+                grep ': [0-9A-F]' "$CONFIG_FILE"
+                
+                echo -e "\n${YELLOW}${WARN} Încerc metoda agresivă...${NC}"
+                # Metoda NUCLEARĂ:  elimină ORICE whitespace între :  și cifră
+                sed -i 's/:[[:blank:]]\+\([0-9A-F]\)/:\1/g' "$CONFIG_FILE"
+                
+                # Verificare finală
+                if grep -q ':  [0-9A-F]' "$CONFIG_FILE"; then
+                    echo -e "${RED}${CROSS} Eșec total! Restaurez backup...${NC}"
+                    cp "$backup_file" "$CONFIG_FILE"
+                else
+                    echo -e "${GREEN}${CHECK} Reparare reușită (metoda agresivă)!${NC}"
+                fi
+            else
+                echo -e "${GREEN}${CHECK} Configurație reparată cu succes! ${NC}"
+            fi
+            
+            # Reîncarcă configurația
+            echo -e "${CYAN}${INFO} Reîncarc configurația... ${NC}"
+            load_config
+            echo -e "${GREEN}${CHECK} Configurație reîncărcată${NC}"
+        fi
+    else
+        echo -e "${GREEN}${CHECK} Nicio problemă găsită!  Configurația este OK.${NC}"
+    fi
+    
+    print_separator
+}
+
 
 # ═══════════════════════════════════════════════════════════════
 # MAIN (MODIFICAT)
@@ -802,6 +910,12 @@ if [[ $# -eq 0 ]]; then
                 echo -e "${CYAN}${INFO} Cache șters, se va actualiza... ${NC}"
                 sleep 1
                 ;;
+            8)
+                clear
+                verify_and_repair_config
+                read -p "$(echo -e ${GRAY}Apasă Enter pentru a continua...${NC})"
+                ;;
+
             0)
                 echo -e "${GREEN}${CHECK} La revedere! ${NC}"
                 exit 0
