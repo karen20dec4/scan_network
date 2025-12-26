@@ -1,5 +1,5 @@
 #!/bin/bash
-# version 2.3 - Fixed config persistence, backup naming, and history
+# version 2.31 - Fixed config persistence, backup naming, and history
 # Autor: Enhanced by Copilot
 # Data: 2025-12-26
 
@@ -279,6 +279,81 @@ save_to_history() {
     echo "$entry" >> "${HISTORY_FILE}"
 }
 
+
+
+# ═══════════════════════════════════════════════════════════════
+# FUNCȚIE NOUĂ: Verifică dacă un IP este online
+# ═══════════════════════════════════════════════════════════════
+check_ip_online() {
+    local ip=$1
+    # Ping rapid (1 pachet, timeout 1s)
+    ping -c 1 -W 1 "$ip" > /dev/null 2>&1
+    return $?
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# FUNCȚIE NOUĂ: Afișează dashboard cu status PC-uri monitorizate
+# ═══════════════════════════════════════════════════════════════
+show_monitored_dashboard() {
+    # Dacă nu avem PC-uri monitorizate, skip
+    [[ ${#CALCULATOARE[@]} -eq 0 ]] && return
+    
+    echo -e "\n${CYAN}╔$(printf '═%.0s' $(seq 1 68))╗${NC}"
+    echo -e "${CYAN}║${BOLD}${WHITE}$(printf '%*s' 39 "Calculatoare Monitorizate")$(printf '%*s' 29 "")${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}╠$(printf '═%.0s' $(seq 1 68))╣${NC}"
+    
+    # Array asociativ pentru a mapa MAC -> IP din ultima scanare
+    declare -A mac_to_ip
+    
+    # Scanare rapidă pentru a obține IP-urile curente
+    local scan_output=$(sudo nmap -sn -T5 $SUBNET 2>/dev/null | grep -B2 "MAC Address")
+    
+    # Parsare rezultate nmap pentru a construi maparea MAC->IP
+    while IFS= read -r line; do
+        if [[ $line =~ ^Nmap\ scan\ report\ for\ ([0-9.]+) ]]; then
+            local current_ip="${BASH_REMATCH[1]}"
+        elif [[ $line =~ MAC\ Address: \ ([0-9A-Fa-f: ]+) ]]; then
+            local current_mac=$(echo "${BASH_REMATCH[1]}" | tr 'a-f' 'A-F')
+            mac_to_ip[$current_mac]="$current_ip"
+        fi
+    done <<< "$scan_output"
+    
+    # Verifică și PC-ul local (nu apare în nmap cu MAC)
+    local local_mac=$(ip link show | grep "link/ether" | awk '{print $2}' | tr 'a-f' 'A-F' | head -n 1)
+    if [[ -n "$local_mac" ]]; then
+        local local_ip=$(hostname -I | awk '{print $1}')
+        mac_to_ip[$local_mac]="$local_ip"
+    fi
+    
+    # Afișare status pentru fiecare PC monitorizat
+    for mac in "${! CALCULATOARE[@]}"; do
+        local name="${CALCULATOARE[$mac]}"
+        local ip="${mac_to_ip[$mac]}"
+        
+        if [[ -n "$ip" ]]; then
+            # PC găsit, verifică dacă răspunde la ping
+            if check_ip_online "$ip"; then
+                printf "${CYAN}║${NC} ${WHITE}%-15s${NC} → %-30s ${GREEN}%-8s${NC} ${CYAN}║${NC}\n" \
+                    "$ip" "${name: 0:30}" "ONLINE"
+            else
+                printf "${CYAN}║${NC} ${WHITE}%-15s${NC} → %-30s ${YELLOW}%-8s${NC} ${CYAN}║${NC}\n" \
+                    "$ip" "${name:0:30}" "PING?"
+            fi
+        else
+            # PC nu găsit în rețea
+            printf "${CYAN}║${NC} ${GRAY}%-15s${NC} → %-30s ${RED}%-8s${NC} ${CYAN}║${NC}\n" \
+                "N/A" "${name:0:30}" "OFFLINE"
+        fi
+    done
+    
+    echo -e "${CYAN}╚$(printf '═%.0s' $(seq 1 68))╝${NC}"
+    echo ""
+}
+
+
+
 # ═══════════════════════════════════════════════════════════════
 # FUNCȚIA PRINCIPALĂ DE SCANARE
 # ═══════════════════════════════════════════════════════════════
@@ -287,6 +362,9 @@ perform_scan() {
     local interactive=$1
     
     print_header "SCANARE REȚEA LOCALĂ"
+
+    # NOU: Afișează dashboard-ul cu status PC-uri monitorizate
+    show_monitored_dashboard
     
     echo -e "${CYAN}${SEARCH} Scanez subnet: ${WHITE}$SUBNET${NC}"
     echo -e "${GRAY}Te rog așteaptă... ${NC}\n"
