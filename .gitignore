@@ -1,0 +1,10 @@
+retea_config.conf
+retea_config.conf.bak.*
+retea_config.conf.before_repair_*
+retea_config.windows.json
+retea_config.windows.json.bak.*
+retea_config.windows.json.corrupt.*
+retea_history.json
+retea_history.windows.jsonl
+status_retea.log
+status_retea_windows.log
